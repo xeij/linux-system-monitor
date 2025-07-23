@@ -148,6 +148,134 @@ void parse_arguments(int argc, char* argv[], config_t* config) {
     }
 }
 
+// Read CPU statistics from /proc/stat
+int read_cpu_stats(cpu_stats_t* stats) {
+    FILE* file = fopen("/proc/stat", "r");
+    if (!file) {
+        perror("Error opening /proc/stat");
+        return -1;
+    }
+    
+    char line[MAX_LINE_LENGTH];
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        fprintf(stderr, "Error reading from /proc/stat\n");
+        return -1;
+    }
+    
+    fclose(file);
+    
+    // Store previous values
+    stats->prev_user = stats->user;
+    stats->prev_nice = stats->nice;
+    stats->prev_system = stats->system;
+    stats->prev_idle = stats->idle;
+    stats->prev_iowait = stats->iowait;
+    stats->prev_irq = stats->irq;
+    stats->prev_softirq = stats->softirq;
+    stats->prev_steal = stats->steal;
+    
+    // Parse current values
+    int result = sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                       &stats->user, &stats->nice, &stats->system, &stats->idle,
+                       &stats->iowait, &stats->irq, &stats->softirq, &stats->steal);
+    
+    if (result < 4) {
+        fprintf(stderr, "Error parsing /proc/stat\n");
+        return -1;
+    }
+    
+    return 0;
+}
+
+// Calculate CPU usage percentage
+void calculate_cpu_usage(cpu_stats_t* stats) {
+    unsigned long long prev_total = stats->prev_user + stats->prev_nice + 
+                                   stats->prev_system + stats->prev_idle + 
+                                   stats->prev_iowait + stats->prev_irq + 
+                                   stats->prev_softirq + stats->prev_steal;
+    
+    unsigned long long curr_total = stats->user + stats->nice + 
+                                   stats->system + stats->idle + 
+                                   stats->iowait + stats->irq + 
+                                   stats->softirq + stats->steal;
+    
+    unsigned long long prev_idle = stats->prev_idle + stats->prev_iowait;
+    unsigned long long curr_idle = stats->idle + stats->iowait;
+    
+    unsigned long long total_diff = curr_total - prev_total;
+    unsigned long long idle_diff = curr_idle - prev_idle;
+    
+    if (total_diff == 0) {
+        stats->usage_percent = 0.0;
+    } else {
+        stats->usage_percent = (double)(total_diff - idle_diff) / total_diff * 100.0;
+    }
+    
+    // Ensure percentage is within valid range
+    if (stats->usage_percent < 0.0) stats->usage_percent = 0.0;
+    if (stats->usage_percent > 100.0) stats->usage_percent = 100.0;
+}
+
+// Read memory statistics from /proc/meminfo
+int read_memory_stats(memory_stats_t* stats) {
+    FILE* file = fopen("/proc/meminfo", "r");
+    if (!file) {
+        perror("Error opening /proc/meminfo");
+        return -1;
+    }
+    
+    char line[MAX_LINE_LENGTH];
+    char key[64];
+    unsigned long value;
+    
+    // Initialize values
+    stats->total = 0;
+    stats->available = 0;
+    stats->free = 0;
+    stats->buffers = 0;
+    stats->cached = 0;
+    
+    while (fgets(line, sizeof(line), file)) {
+        if (sscanf(line, "%63s %lu kB", key, &value) == 2) {
+            if (strcmp(key, "MemTotal:") == 0) {
+                stats->total = value;
+            } else if (strcmp(key, "MemAvailable:") == 0) {
+                stats->available = value;
+            } else if (strcmp(key, "MemFree:") == 0) {
+                stats->free = value;
+            } else if (strcmp(key, "Buffers:") == 0) {
+                stats->buffers = value;
+            } else if (strcmp(key, "Cached:") == 0) {
+                stats->cached = value;
+            }
+        }
+    }
+    
+    fclose(file);
+    
+    // Calculate used memory and usage percentage
+    if (stats->available > 0) {
+        stats->used = stats->total - stats->available;
+    } else {
+        // Fallback calculation if MemAvailable is not present
+        stats->used = stats->total - stats->free - stats->buffers - stats->cached;
+        stats->available = stats->free + stats->buffers + stats->cached;
+    }
+    
+    if (stats->total > 0) {
+        stats->usage_percent = (double)stats->used / stats->total * 100.0;
+    } else {
+        stats->usage_percent = 0.0;
+    }
+    
+    // Ensure percentage is within valid range
+    if (stats->usage_percent < 0.0) stats->usage_percent = 0.0;
+    if (stats->usage_percent > 100.0) stats->usage_percent = 100.0;
+    
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     config_t config;
     cpu_stats_t cpu_stats = {0};
