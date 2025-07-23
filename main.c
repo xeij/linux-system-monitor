@@ -276,6 +276,172 @@ int read_memory_stats(memory_stats_t* stats) {
     return 0;
 }
 
+// Read disk statistics using statvfs
+int read_disk_stats(const char* path, disk_stats_t* stats) {
+    struct statvfs vfs;
+    
+    if (statvfs(path, &vfs) != 0) {
+        perror("Error getting disk statistics");
+        return -1;
+    }
+    
+    // Copy mount point
+    strncpy(stats->mount_point, path, MAX_PATH_LENGTH - 1);
+    stats->mount_point[MAX_PATH_LENGTH - 1] = '\0';
+    
+    // Calculate disk usage in bytes
+    stats->total = (unsigned long long)vfs.f_blocks * vfs.f_frsize;
+    stats->available = (unsigned long long)vfs.f_bavail * vfs.f_frsize;
+    stats->used = stats->total - ((unsigned long long)vfs.f_bfree * vfs.f_frsize);
+    
+    // Calculate usage percentage
+    if (stats->total > 0) {
+        stats->usage_percent = (double)stats->used / stats->total * 100.0;
+    } else {
+        stats->usage_percent = 0.0;
+    }
+    
+    // Ensure percentage is within valid range
+    if (stats->usage_percent < 0.0) stats->usage_percent = 0.0;
+    if (stats->usage_percent > 100.0) stats->usage_percent = 100.0;
+    
+    return 0;
+}
+
+// Clear terminal screen
+void clear_screen(void) {
+    printf("\033[2J\033[H");
+}
+
+// Print a progress bar with percentage
+void print_progress_bar(const char* label, double percentage, const char* color) {
+    int filled = (int)(percentage * PROGRESS_BAR_WIDTH / 100.0);
+    int empty = PROGRESS_BAR_WIDTH - filled;
+    
+    printf("%s%-12s%s [", BOLD, label, RESET);
+    
+    // Print filled portion
+    printf("%s", color);
+    for (int i = 0; i < filled; i++) {
+        printf("█");
+    }
+    
+    // Print empty portion
+    printf("%s", RESET);
+    for (int i = 0; i < empty; i++) {
+        printf("░");
+    }
+    
+    printf("] %s%.1f%%%s\n", BOLD, percentage, RESET);
+}
+
+// Convert bytes to human readable format
+void format_bytes(unsigned long long bytes, char* buffer, size_t buffer_size) {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    int unit_index = 0;
+    double size = (double)bytes;
+    
+    while (size >= 1024.0 && unit_index < 4) {
+        size /= 1024.0;
+        unit_index++;
+    }
+    
+    if (unit_index == 0) {
+        snprintf(buffer, buffer_size, "%llu %s", bytes, units[unit_index]);
+    } else {
+        snprintf(buffer, buffer_size, "%.1f %s", size, units[unit_index]);
+    }
+}
+
+// Print comprehensive system information
+void print_system_info(const cpu_stats_t* cpu, const memory_stats_t* memory, 
+                      const disk_stats_t* disk, const config_t* config) {
+    time_t now = time(NULL);
+    char time_str[64];
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&now));
+    
+    printf("%s%sSystem Status - %s%s\n", BOLD, WHITE, time_str, RESET);
+    printf("═══════════════════════════════════════════════════════════\n\n");
+    
+    // CPU Information
+    if (config->show_cpu) {
+        printf("%s%sCPU Usage:%s\n", BOLD, CYAN, RESET);
+        
+        const char* cpu_color = GREEN;
+        if (cpu->usage_percent > 80.0) cpu_color = RED;
+        else if (cpu->usage_percent > 60.0) cpu_color = YELLOW;
+        
+        print_progress_bar("CPU", cpu->usage_percent, cpu_color);
+        
+        printf("  %sDetails:%s User: %.1f%%, System: %.1f%%, Idle: %.1f%%\n\n",
+               BOLD, RESET,
+               (double)(cpu->user - cpu->prev_user) / 
+               (double)((cpu->user + cpu->nice + cpu->system + cpu->idle + 
+                        cpu->iowait + cpu->irq + cpu->softirq + cpu->steal) - 
+                       (cpu->prev_user + cpu->prev_nice + cpu->prev_system + 
+                        cpu->prev_idle + cpu->prev_iowait + cpu->prev_irq + 
+                        cpu->prev_softirq + cpu->prev_steal)) * 100.0,
+               (double)(cpu->system - cpu->prev_system) / 
+               (double)((cpu->user + cpu->nice + cpu->system + cpu->idle + 
+                        cpu->iowait + cpu->irq + cpu->softirq + cpu->steal) - 
+                       (cpu->prev_user + cpu->prev_nice + cpu->prev_system + 
+                        cpu->prev_idle + cpu->prev_iowait + cpu->prev_irq + 
+                        cpu->prev_softirq + cpu->prev_steal)) * 100.0,
+               (double)(cpu->idle - cpu->prev_idle) / 
+               (double)((cpu->user + cpu->nice + cpu->system + cpu->idle + 
+                        cpu->iowait + cpu->irq + cpu->softirq + cpu->steal) - 
+                       (cpu->prev_user + cpu->prev_nice + cpu->prev_system + 
+                        cpu->prev_idle + cpu->prev_iowait + cpu->prev_irq + 
+                        cpu->prev_softirq + cpu->prev_steal)) * 100.0);
+    }
+    
+    // Memory Information
+    if (config->show_memory) {
+        printf("%s%sMemory Usage:%s\n", BOLD, MAGENTA, RESET);
+        
+        const char* mem_color = GREEN;
+        if (memory->usage_percent > 90.0) mem_color = RED;
+        else if (memory->usage_percent > 75.0) mem_color = YELLOW;
+        
+        print_progress_bar("Memory", memory->usage_percent, mem_color);
+        
+        char total_str[32], used_str[32], available_str[32];
+        format_bytes((unsigned long long)memory->total * 1024, total_str, sizeof(total_str));
+        format_bytes((unsigned long long)memory->used * 1024, used_str, sizeof(used_str));
+        format_bytes((unsigned long long)memory->available * 1024, available_str, sizeof(available_str));
+        
+        printf("  %sDetails:%s Used: %s, Available: %s, Total: %s\n",
+               BOLD, RESET, used_str, available_str, total_str);
+        
+        char buffers_str[32], cached_str[32];
+        format_bytes((unsigned long long)memory->buffers * 1024, buffers_str, sizeof(buffers_str));
+        format_bytes((unsigned long long)memory->cached * 1024, cached_str, sizeof(cached_str));
+        
+        printf("  %sCaching:%s Buffers: %s, Cached: %s\n\n", BOLD, RESET, buffers_str, cached_str);
+    }
+    
+    // Disk Information
+    if (config->show_disk) {
+        printf("%s%sDisk Usage (%s):%s\n", BOLD, YELLOW, disk->mount_point, RESET);
+        
+        const char* disk_color = GREEN;
+        if (disk->usage_percent > 90.0) disk_color = RED;
+        else if (disk->usage_percent > 80.0) disk_color = YELLOW;
+        
+        print_progress_bar("Disk", disk->usage_percent, disk_color);
+        
+        char total_str[32], used_str[32], available_str[32];
+        format_bytes(disk->total, total_str, sizeof(total_str));
+        format_bytes(disk->used, used_str, sizeof(used_str));
+        format_bytes(disk->available, available_str, sizeof(available_str));
+        
+        printf("  %sDetails:%s Used: %s, Available: %s, Total: %s\n\n",
+               BOLD, RESET, used_str, available_str, total_str);
+    }
+    
+    printf("═══════════════════════════════════════════════════════════\n");
+}
+
 int main(int argc, char* argv[]) {
     config_t config;
     cpu_stats_t cpu_stats = {0};
